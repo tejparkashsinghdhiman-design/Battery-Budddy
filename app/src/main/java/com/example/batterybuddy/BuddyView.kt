@@ -22,7 +22,9 @@ object Buddy {
  *  - no image:        the built-in original neko girl
  *  - image:           the image becomes a round head on a little body (body colour sampled from the image)
  *  - image + sprite:  the image is drawn as-is (for full-body transparent PNGs)
- * Happy heart while charging, sweat drop at <=15%. Coordinates are a 100 x 125 box scaled to the view.
+ * Moods: happy heart while charging, sweat drop at <=15% or when overheating (face/ring turns red),
+ * and she rests (stops animating) at <=15% to save power.
+ * Coordinates are a 100 x 125 box scaled to the view.
  */
 class BuddyView(context: Context) : View(context) {
     var image: Bitmap? = null
@@ -32,16 +34,20 @@ class BuddyView(context: Context) : View(context) {
 
     private var level = 100
     private var charging = false
+    private var hot = false
     private var shader: BitmapShader? = null
     private var bodyColor = DRESS
 
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val path = Path()
-    private val low: Boolean get() = level <= 15 && !charging
+    private val resting: Boolean get() = level <= 15 && !charging
+    private val happy: Boolean get() = charging && !hot
+    private val worried: Boolean get() = hot || resting
 
-    fun setBattery(level: Int, charging: Boolean) {
+    fun setBattery(level: Int, charging: Boolean, hot: Boolean) {
         this.level = level
         this.charging = charging
+        this.hot = hot
         invalidate()
     }
 
@@ -70,14 +76,15 @@ class BuddyView(context: Context) : View(context) {
 
     override fun onDraw(c: Canvas) {
         c.scale(width / 100f, height / 125f)
-        val t = SystemClock.uptimeMillis() / 1000f
+        // rest mode: frozen pose, redrawn once a second -> almost no power use
+        val t = if (resting) 0f else SystemClock.uptimeMillis() / 1000f
         val bmp = image
         when {
             bmp != null && sprite -> drawSprite(c, bmp, t)
             bmp != null -> drawPortrait(c, t)
             else -> drawGirl(c, t)
         }
-        postInvalidateDelayed(80) // ~12 fps, stops by itself when the view is hidden
+        postInvalidateDelayed(if (resting) 1000L else 80L) // ~12 fps; stops by itself when the view is hidden
     }
 
     private fun drawSprite(c: Canvas, bmp: Bitmap, t: Float) {
@@ -97,7 +104,7 @@ class BuddyView(context: Context) : View(context) {
         fill(Color.WHITE); p.shader = sh
         c.drawCircle(HEAD_X, HEAD_Y, HEAD_R, p)
         p.shader = null
-        stroke(Color.WHITE, 2.5f)
+        stroke(if (hot) RED else Color.WHITE, 2.5f)
         c.drawCircle(HEAD_X, HEAD_Y, HEAD_R, p)
         drawMood(c, t)
         c.restore()
@@ -126,7 +133,7 @@ class BuddyView(context: Context) : View(context) {
     }
 
     private fun drawMood(c: Canvas, t: Float) {
-        if (charging) {
+        if (happy) {
             c.save()
             c.translate(88f, 14f + sin(t * 4f) * 2f); c.scale(1.3f, 1.3f)
             fill(PINK); path.reset()
@@ -134,7 +141,7 @@ class BuddyView(context: Context) : View(context) {
             path.cubicTo(3.5f, -8f, 7f, -2f, 0f, 2.5f)
             c.drawPath(path, p)
             c.restore()
-        } else if (low) {
+        } else if (worried) {
             c.save()
             c.translate(87f, 22f)
             fill(0xFF74C0FC.toInt()); path.reset()
@@ -172,15 +179,16 @@ class BuddyView(context: Context) : View(context) {
             c.restore()
         }
 
-        // face + blush
+        // face + blush (+ red flush when overheating)
         fill(SKIN); c.drawOval(RectF(26f, 16f, 74f, 60f), p)
+        if (hot) { fill(0x55FF3B30); c.drawOval(RectF(26f, 16f, 74f, 60f), p) }
         fill(0x66FF6F91)
         c.drawOval(RectF(27f, 47f, 37f, 53f), p)
         c.drawOval(RectF(63f, 47f, 73f, 53f), p)
 
         // eyes
         for (ex in floatArrayOf(38f, 62f)) {
-            if (charging) {
+            if (happy) {
                 stroke(EYE, 2.6f)
                 path.reset(); path.moveTo(ex - 5f, 45f); path.quadTo(ex, 37f, ex + 5f, 45f)
                 c.drawPath(path, p)
@@ -197,12 +205,12 @@ class BuddyView(context: Context) : View(context) {
         // mouth
         path.reset()
         when {
-            charging -> {
+            happy -> {
                 fill(0xFFD6336C.toInt())
                 path.moveTo(45f, 53f); path.quadTo(50f, 61f, 55f, 53f); path.close()
                 c.drawPath(path, p)
             }
-            low -> {
+            worried -> {
                 stroke(EYE, 2f)
                 path.moveTo(45f, 56f); path.quadTo(50f, 51f, 55f, 56f)
                 c.drawPath(path, p)

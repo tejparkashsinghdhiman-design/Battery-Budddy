@@ -1,8 +1,10 @@
 package com.example.batterybuddy
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -30,7 +32,7 @@ import java.net.URL
 private const val ANILIST = "https://graphql.anilist.co"
 private const val QUERY =
     "query (\$q: String) { Page(perPage: 12) { characters(search: \$q, sort: FAVOURITES_DESC) { " +
-        "name { full } image { large } media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { romaji } } } } } }"
+        "name { full } image { large } media(perPage: 1, sort: POPULARITY_DESC) { nodes { isAdult title { romaji } } } } } }"
 
 class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
@@ -38,15 +40,21 @@ class MainActivity : Activity() {
     private lateinit var results: LinearLayout
     private lateinit var status: TextView
     private lateinit var spriteSwitch: Switch
+    private lateinit var showSwitch: Switch
     @Volatile private var searchId = 0
 
-    private data class Hit(val name: String, val series: String, val image: String)
+    private data class Hit(val name: String, val series: String, val image: String, val adult: Boolean)
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Buddy.prefs(this)
+
+        // needed on Android 13+ for the charge-limit and overheat alerts
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
+        }
 
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -62,14 +70,11 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(12); bottomMargin = dp(12)
         })
 
-        col.addView(button("1. Turn on “Battery Buddy” in Accessibility") {
+        col.addView(button("1. Turn on \u201cBattery Buddy\u201d in Accessibility") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
-        col.addView(Switch(this).apply {
-            text = "Show buddy"
-            isChecked = prefs.getBoolean("show", true)
-            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("show", on).apply() }
-        })
+        showSwitch = toggle("Show buddy", "show", true)
+        col.addView(showSwitch)
 
         // ---- character search ----
         col.addView(TextView(this).apply {
@@ -103,9 +108,23 @@ class MainActivity : Activity() {
         col.addView(TextView(this).apply {
             text = "3. Place her on the battery"; textSize = 18f; setPadding(0, dp(20), 0, 0)
         })
-        col.addView(slider("Size", "size", 16, 60, 26))
-        col.addView(slider("Distance from right edge", "x", 0, 120, 6))
-        col.addView(slider("Distance from top", "y", -20, 40, 0))
+        col.addView(slider("Size", "size", 16, 60, 26, "dp"))
+        col.addView(slider("Distance from right edge", "x", 0, 120, 6, "dp"))
+        col.addView(slider("Distance from top", "y", -20, 40, 0, "dp"))
+
+        // ---- safety ----
+        col.addView(TextView(this).apply {
+            text = "4. Safety"; textSize = 18f; setPadding(0, dp(20), 0, 0)
+        })
+        col.addView(toggle("Tell me when to unplug (protects battery health)", "alert_charge", true))
+        col.addView(slider("Charge limit", "limit", 50, 100, 80, "%"))
+        col.addView(toggle("Overheat warning at 43 \u00b0C and above", "alert_hot", true))
+        col.addView(toggle("Hide search results from adult titles", "hide_adult", true))
+        col.addView(TextView(this).apply {
+            text = "She can\u2019t be tapped, so she never blocks your screen. She rests at 15% to save power. " +
+                "Add the \u201cBattery Buddy\u201d tile to Quick Settings for an instant on/off switch."
+            textSize = 13f; setPadding(0, dp(8), 0, 0)
+        })
 
         col.addView(button("Use an image from my gallery") { pickFromGallery() })
         col.addView(button("Back to the default girl") {
@@ -115,24 +134,35 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(col) })
     }
 
+    override fun onResume() {
+        super.onResume()
+        showSwitch.isChecked = prefs.getBoolean("show", true) // the Quick Settings tile may have changed it
+    }
+
     private fun button(label: String, onClick: () -> Unit) =
         Button(this).apply { text = label; isAllCaps = false; setOnClickListener { onClick() } }
 
-    private fun slider(label: String, key: String, lo: Int, hi: Int, def: Int): LinearLayout {
+    private fun toggle(label: String, key: String, def: Boolean) = Switch(this).apply {
+        text = label
+        isChecked = prefs.getBoolean(key, def)
+        setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(key, on).apply() }
+    }
+
+    private fun slider(label: String, key: String, lo: Int, hi: Int, def: Int, unit: String): LinearLayout {
         val tv = TextView(this)
         val sb = SeekBar(this).apply {
             max = hi - lo
             progress = prefs.getInt(key, def) - lo
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
-                    tv.text = "$label: ${p + lo} dp"
+                    tv.text = "$label: ${p + lo} $unit"
                     if (fromUser) prefs.edit().putInt(key, p + lo).apply()
                 }
                 override fun onStartTrackingTouch(s: SeekBar) {}
                 override fun onStopTrackingTouch(s: SeekBar) {}
             })
         }
-        tv.text = "$label: ${sb.progress + lo} dp"
+        tv.text = "$label: ${sb.progress + lo} $unit"
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, dp(12), 0, 0)
@@ -146,12 +176,13 @@ class MainActivity : Activity() {
         getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(box.windowToken, 0)
         val q = box.text.toString().trim()
         if (q.isEmpty()) return
+        val hideAdult = prefs.getBoolean("hide_adult", true)
         val id = ++searchId
         results.removeAllViews()
-        status.text = "Searching…"
+        status.text = "Searching\u2026"
         Thread {
             try {
-                val hits = anilist(q)
+                val hits = anilist(q, hideAdult)
                 runOnUiThread {
                     if (id == searchId) status.text = if (hits.isEmpty()) "No character found." else "Tap one to use them:"
                 }
@@ -166,7 +197,7 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun anilist(q: String): List<Hit> {
+    private fun anilist(q: String, hideAdult: Boolean): List<Hit> {
         val body = JSONObject().put("query", QUERY).put("variables", JSONObject().put("q", q)).toString()
         val conn = URL(ANILIST).openConnection() as HttpURLConnection
         try {
@@ -181,22 +212,29 @@ class MainActivity : Activity() {
             val arr = JSONObject(json).getJSONObject("data").getJSONObject("Page").getJSONArray("characters")
             return List(arr.length()) { i ->
                 val o = arr.getJSONObject(i)
-                val series = o.optJSONObject("media")?.optJSONArray("nodes")?.optJSONObject(0)
-                    ?.optJSONObject("title")?.optString("romaji") ?: ""
-                Hit(o.getJSONObject("name").optString("full"), series, o.getJSONObject("image").optString("large"))
-            }
+                val node = o.optJSONObject("media")?.optJSONArray("nodes")?.optJSONObject(0)
+                Hit(
+                    o.getJSONObject("name").optString("full"),
+                    node?.optJSONObject("title")?.optString("romaji") ?: "",
+                    o.getJSONObject("image").optString("large"),
+                    node?.optBoolean("isAdult", false) ?: false
+                )
+            }.filter { !(hideAdult && it.adult) }
         } finally {
             conn.disconnect()
         }
     }
 
-    private fun download(url: String): Bitmap? = try {
-        val c = URL(url).openConnection() as HttpURLConnection
-        c.connectTimeout = 10000
-        c.readTimeout = 10000
-        c.inputStream.use { BitmapFactory.decodeStream(it) }
-    } catch (e: Exception) {
-        null
+    private fun download(url: String): Bitmap? {
+        if (!url.startsWith("https://")) return null // HTTPS only
+        return try {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = 10000
+            c.readTimeout = 10000
+            c.inputStream.use { BitmapFactory.decodeStream(it) }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun addRow(hit: Hit, bmp: Bitmap?) {
@@ -256,7 +294,7 @@ class MainActivity : Activity() {
             save(bmp)
             preview.image = bmp
         } catch (e: Exception) {
-            Toast.makeText(this, "Couldn’t load that image", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Couldn\u2019t load that image", Toast.LENGTH_SHORT).show()
         }
     }
 }
