@@ -11,14 +11,18 @@ import android.graphics.ImageDecoder
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -41,6 +45,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var spriteSwitch: Switch
     private lateinit var showSwitch: Switch
+    private val spinners = ArrayList<Pair<String, Spinner>>()
     @Volatile private var searchId = 0
 
     private data class Hit(val name: String, val series: String, val image: String, val adult: Boolean)
@@ -62,11 +67,12 @@ class MainActivity : Activity() {
         }
         col.addView(TextView(this).apply { text = "Battery Buddy"; textSize = 26f })
 
+        // the preview follows every setting live (BuddyView listens to the prefs itself)
         preview = BuddyView(this).apply {
             image = Buddy.loadImage(this@MainActivity)
             sprite = prefs.getBoolean("sprite", false)
         }
-        col.addView(preview, LinearLayout.LayoutParams(dp(120), dp(150)).apply {
+        col.addView(preview, LinearLayout.LayoutParams(dp(140), dp(175)).apply {
             gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(12); bottomMargin = dp(12)
         })
 
@@ -76,12 +82,11 @@ class MainActivity : Activity() {
         showSwitch = toggle("Show buddy", "show", true)
         col.addView(showSwitch)
 
-        // ---- character search ----
-        col.addView(TextView(this).apply {
-            text = "2. Pick your character"; textSize = 18f; setPadding(0, dp(20), 0, 0)
-        })
+        // ---- 2. character ----
+        col.addView(heading("2. Choose your character"))
+        col.addView(TextView(this).apply { text = "Search any anime character:" })
         val box = EditText(this).apply {
-            hint = "Any anime character, e.g. Dazai, Johan"
+            hint = "e.g. Dazai, Johan"
             setSingleLine()
             imeOptions = EditorInfo.IME_ACTION_SEARCH
         }
@@ -95,6 +100,7 @@ class MainActivity : Activity() {
         col.addView(status)
         col.addView(results)
 
+        col.addView(button("Use an image from my gallery") { pickFromGallery() })
         spriteSwitch = Switch(this).apply {
             text = "My image is a full-body transparent PNG (draw it as-is, not as a head)"
             isChecked = prefs.getBoolean("sprite", false)
@@ -106,16 +112,47 @@ class MainActivity : Activity() {
         col.addView(spriteSwitch)
 
         col.addView(TextView(this).apply {
-            text = "3. Place her on the battery"; textSize = 18f; setPadding(0, dp(20), 0, 0)
+            text = "\u2026or build your own:"; textSize = 16f; setPadding(0, dp(20), 0, 0)
         })
+        val presetSpinner = Spinner(this)
+        presetSpinner.adapter = ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item,
+            listOf("Choose a preset\u2026") + Look.PRESETS.map { it.first }
+        )
+        presetSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (pos > 0) { applyPreset(pos - 1); presetSpinner.setSelection(0) }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        col.addView(presetSpinner)
+        col.addView(choice("Hair style", "hair", Look.HAIR_STYLES, 0))
+        col.addView(choice("Hair colour", "hair_color", Look.HAIR_COLOR_NAMES, 0))
+        col.addView(choice("Skin", "skin", Look.SKIN_NAMES, 0))
+        col.addView(choice("Eyes", "eyes", Look.EYE_NAMES, 0))
+        col.addView(choice("Outfit colour", "outfit", Look.OUTFIT_NAMES, 0))
+        col.addView(choice("Ears and tail", "ears", Look.EAR_NAMES, 1))
+        col.addView(choice("Accessory", "acc", Look.ACC_NAMES, 1))
+        col.addView(button("Use the built-in character") { useBuiltIn() })
+
+        // ---- 3. style ----
+        col.addView(heading("3. Style"))
+        col.addView(choice("Look", "style", Look.STYLE_NAMES, 1))
+        col.addView(toggle("Tilt with my phone (3D only)", "tilt", true))
+        col.addView(slider("Animation speed", "speed", 50, 200, 100, "%"))
+        col.addView(TextView(this).apply {
+            text = "Hair, ears and outfit apply to the built-in character. 2D/3D and speed apply to everyone."
+            textSize = 13f; setPadding(0, dp(8), 0, 0)
+        })
+
+        // ---- 4. placement ----
+        col.addView(heading("4. Place her on the battery"))
         col.addView(slider("Size", "size", 16, 60, 26, "dp"))
         col.addView(slider("Distance from right edge", "x", 0, 120, 6, "dp"))
         col.addView(slider("Distance from top", "y", -20, 40, 0, "dp"))
 
-        // ---- safety ----
-        col.addView(TextView(this).apply {
-            text = "4. Safety"; textSize = 18f; setPadding(0, dp(20), 0, 0)
-        })
+        // ---- 5. safety ----
+        col.addView(heading("5. Safety"))
         col.addView(toggle("Tell me when to unplug (protects battery health)", "alert_charge", true))
         col.addView(slider("Charge limit", "limit", 50, 100, 80, "%"))
         col.addView(toggle("Overheat warning at 43 \u00b0C and above", "alert_hot", true))
@@ -126,17 +163,18 @@ class MainActivity : Activity() {
             textSize = 13f; setPadding(0, dp(8), 0, 0)
         })
 
-        col.addView(button("Use an image from my gallery") { pickFromGallery() })
-        col.addView(button("Back to the default girl") {
-            prefs.edit().putBoolean("custom", false).putLong("rev", System.nanoTime()).apply()
-            preview.image = null
-        })
         setContentView(ScrollView(this).apply { addView(col) })
     }
 
     override fun onResume() {
         super.onResume()
         showSwitch.isChecked = prefs.getBoolean("show", true) // the Quick Settings tile may have changed it
+    }
+
+    // ---------------- small UI helpers ----------------
+
+    private fun heading(text: String) = TextView(this).apply {
+        this.text = text; textSize = 18f; setPadding(0, dp(24), 0, 0)
     }
 
     private fun button(label: String, onClick: () -> Unit) =
@@ -146,6 +184,25 @@ class MainActivity : Activity() {
         text = label
         isChecked = prefs.getBoolean(key, def)
         setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(key, on).apply() }
+    }
+
+    private fun choice(label: String, key: String, items: List<String>, def: Int): LinearLayout {
+        val sp = Spinner(this)
+        sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
+        sp.setSelection(prefs.getInt(key, def).coerceIn(0, items.lastIndex))
+        sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (prefs.getInt(key, def) != pos) prefs.edit().putInt(key, pos).apply()
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        spinners.add(key to sp)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(10), 0, 0)
+            addView(TextView(this@MainActivity).apply { text = label })
+            addView(sp)
+        }
     }
 
     private fun slider(label: String, key: String, lo: Int, hi: Int, def: Int, unit: String): LinearLayout {
@@ -168,6 +225,22 @@ class MainActivity : Activity() {
             setPadding(0, dp(12), 0, 0)
             addView(tv); addView(sb)
         }
+    }
+
+    // ---------------- presets / built-in character ----------------
+
+    private fun useBuiltIn() {
+        prefs.edit().putBoolean("custom", false).putLong("rev", System.nanoTime()).apply()
+        preview.image = null
+    }
+
+    private fun applyPreset(i: Int) {
+        val values = Look.PRESETS[i].second
+        val e = prefs.edit()
+        Look.KEYS.forEachIndexed { k, key -> e.putInt(key, values[k]) }
+        e.apply()
+        spinners.filter { it.first in Look.KEYS }.forEach { (key, sp) -> sp.setSelection(prefs.getInt(key, 0)) }
+        useBuiltIn()
     }
 
     // ---------------- search ----------------

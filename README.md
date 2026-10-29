@@ -2,10 +2,17 @@
 
 An anime character that sits on top of your status-bar battery icon (Android 11+, built for Android 15).
 
-- Search any character in the app (AniList API): their portrait becomes the head of a little buddy with swinging legs.
-- Or use your own image; tick the "full-body transparent PNG" switch to draw it as-is.
-- Built-in original neko girl by default. Happy while charging, worried at 15% or below.
-- Drawn with an accessibility overlay (the only way to draw above the status bar). It never reads your screen.
+## Characters
+
+- **Search any anime character** in the app (AniList API): their portrait becomes the head of a little buddy with swinging legs.
+- **Build your own** built-in character: 6 presets (Neko girl, Bunny girl, Fox girl, Spiky hero, Cool guy, Silver mage) or mix hair style (4), hair colour (8), skin (4), eyes (6), outfit colour (8), ears and tail (cat / bunny / fox / none) and accessory (bow / glasses / headphones / none).
+- **Your own image**: pick any picture, or tick the "full-body transparent PNG" switch to draw it as-is.
+
+## 2D and 3D
+
+- **2D**: flat, clean cartoon look.
+- **3D figurine**: real perspective turntable rotation, depth parallax between body parts, gradient shading and a hair shine. It sways on its own or follows your phone's tilt. Works on every character type.
+- Animation speed from 50% to 200%. Happy while charging, worried at 15% or below.
 
 ## Safety features
 
