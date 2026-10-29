@@ -1,32 +1,28 @@
 # Battery Buddy
 
-An anime character that sits on top of your status-bar battery icon (Android 11+, built for Android 15).
+A cute anime character that sits on your status-bar battery icon (Android 11+, built for Android 15).
 
-## Characters
+## Pick a character
 
-- **Search any anime character** in the app (AniList API): their portrait becomes the head of a little buddy with swinging legs.
-- **Build your own** built-in character: 6 presets (Neko girl, Bunny girl, Fox girl, Spiky hero, Cool guy, Silver mage) or mix hair style (4), hair colour (8), skin (4), eyes (6), outfit colour (8), ears and tail (cat / bunny / fox / none) and accessory (bow / glasses / headphones / none).
-- **Your own image**: pick any picture, or tick the "full-body transparent PNG" switch to draw it as-is.
+- **Top 200**: the most-loved anime characters on AniList, ranked, with a Load more button for even more.
+- **Search** any character by name (Dazai, Johan, Zero Two...).
+- **My buddies**: everyone you have picked is saved on the phone and works offline.
+- **Surprise me** picks a random top character. **My photo** uses your own picture.
+- **Build your own** original buddy: 6 presets (Neko girl, Bunny girl, Fox girl, Spiky hero, Cool guy, Silver mage) or mix hair style, hair colour, skin, eyes, outfit colour, ears and tail, and accessory.
 
 ## 2D and 3D
 
-- **2D**: flat, clean cartoon look.
-- **3D figurine**: real perspective turntable rotation, depth parallax between body parts, gradient shading and a hair shine. It sways on its own or follows your phone's tilt. Works on every character type.
-- Animation speed from 50% to 200%. Happy while charging, worried at 15% or below.
+- **2D** flat cartoon look, or a **3D figurine** with real perspective turntable rotation, depth parallax, shading and a hair shine. It sways on its own or follows your phone's tilt. Animation speed from 50% to 200%.
 
 ## Safety features
 
-- **Charge-limit alert**: notifies you to unplug at a limit you choose (default 80%), which is gentler on battery lifespan.
-- **Overheat warning**: notification at 43 °C or when Android reports overheating; the buddy turns red and sweats.
-- **Instant off switch**: add the "Battery Buddy" tile to Quick Settings to hide her in one tap.
-- **Never blocks touches**: the overlay is non-touchable and size-capped.
-- **Rest mode**: at 15% or below (not charging) she stops animating to save power.
-- **Adult-title filter**: search results from adult titles are hidden by default.
-- **Privacy**: no screen reading, no analytics, no backups; the only network use is the character search (HTTPS).
-- **Crash guard**: if Android refuses the overlay, the service idles instead of crashing.
+- **Unplug reminder** at a charge limit you choose (default 80%).
+- **Overheat warning** at 43 °C or when Android reports overheating.
+- **Quick Settings tile** as an instant off switch.
+- Never blocks touches, rests at 15% battery, hides adult-title characters by default, never reads the screen, no analytics, no backups.
 
 ## Setup
 
-Open in Android Studio and run on your phone, or grab `app-debug.apk` from Releases (built by GitHub Actions on every push to `main`).
-Then enable Battery Buddy under Settings > Accessibility and tune size/position with the sliders.
-On aggressive battery managers (realme, etc.) set the app to unrestricted.
+Grab `app-debug.apk` from Releases (built by GitHub Actions on every push to `main`), install it, then enable Battery Buddy under Settings > Accessibility. Tune size and position on the Home tab. On aggressive battery managers (realme, etc.) set the app to unrestricted.
+
+The UI is Jetpack Compose with Material 3. Character data and pictures come from the AniList API.
