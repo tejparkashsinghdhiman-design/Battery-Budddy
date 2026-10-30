@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">Battery Buddy</string>
     <string name="service_desc">Draws a little character over your status bar. It does not read your screen or collect any data.</string>
+    <string name="widget_desc">Your battery buddy and her mood, right on the home screen.</string>
 </resources>
