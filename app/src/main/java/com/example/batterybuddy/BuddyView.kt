@@ -2,7 +2,15 @@ package com.example.batterybuddy
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.graphics.*
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Camera
+import android.graphics.Canvas
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -10,6 +18,9 @@ import android.hardware.SensorManager
 import android.os.SystemClock
 import android.view.View
 import java.io.File
+import java.util.Calendar
+import java.util.Random
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -23,46 +34,59 @@ object Buddy {
 }
 
 /**
- * The buddy. Three looks, all sitting on a ledge with swinging legs:
- *  - no image:        the built-in parametric character (see [Look]: hair, ears, outfit, accessories...)
- *  - image:           the image becomes a round head on a little body (body colour sampled from the image)
- *  - image + sprite:  the image is drawn as-is (for full-body transparent PNGs)
+ * The buddy: the brain (what is she doing right now?) plus a Sprite that draws it.
  *
- * Two render styles: 2D (flat) and 3D (figurine): real perspective turntable rotation via android.graphics.Camera,
- * parallax between depth layers (tail / hair / legs / body / head), gradient shading and a hair shine.
- * The 3D rotation can follow the phone's tilt. Moods: happy while charging, sweat at <=15% or when overheating
- * (flushed red); she rests (stops animating) at <=15% to save power.
+ * Modes: SIMPLE fits the view (mini previews, widget). OVERLAY is the status-bar window: the view is as wide as the
+ * screen so she can wander along it, and she sits [rightMargin] px from the right edge. STAGE is the wide app preview.
  *
- * The view reads its own settings from SharedPreferences and updates live when they change.
- * Coordinates are a 100 x 125 box scaled to the view.
+ * Optimised: no allocations per frame, adaptive frame rate (slow when sleeping, resting, in battery saver),
+ * everything stops when the view is hidden or the screen is off, sensors only run when 3D tilt is on and visible.
  */
 class BuddyView(context: Context) : View(context), SensorEventListener {
-    var look = Look()
-        set(value) { if (value != field) { field = value; applyLook() } }
-    var image: Bitmap? = null
-        set(value) { field = value; rebuild(); invalidate() }
-    var sprite = false
-        set(value) { field = value; invalidate() }
-
+    private val art = Sprite()
+    private val pose = Pose()
     private val prefs = Buddy.prefs(context)
-    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> look = Look.load(prefs) }
+    private val density = context.resources.displayMetrics.density
+    private val random = Random()
 
-    private var level = 100
-    private var charging = false
-    private var hot = false
+    var mode = MODE_SIMPLE
+    var charW = 0f
+    var rightMargin = 0f
 
-    private var hairC = 0
-    private var skinC = 0
-    private var eyeC = 0
-    private var outC = 0
-    private var faceSh: Shader? = null
-    private var hairSh: Shader? = null
-    private var bodySh: Shader? = null
-    private var shader: BitmapShader? = null
-    private var bodyColor = 0
+    var look = Look()
+        set(v) {
+            if (v != field) {
+                field = v
+                art.setLook(v)
+                syncSensor()
+                invalidate()
+            }
+        }
+    var behave = Behave()
+    var fullBody = false
+    var image: Bitmap? = null
+        set(v) {
+            field = v
+            art.setImage(v)
+            invalidate()
+        }
+    var state = BuddyState()
+        set(v) {
+            val old = field
+            field = v
+            onState(old, v)
+            invalidate()
+        }
 
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val path = Path()
+    private val bp = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+    }
+    private val rect = RectF()
+    private val tail = Path()
+
+    // 3D
     private val cam = Camera().apply { setLocation(0f, 0f, -3.5f) }
     private val m3 = Matrix()
     private var ry = 0f
@@ -71,74 +95,126 @@ class BuddyView(context: Context) : View(context), SensorEventListener {
     private var tiltX = 0f
     private var lastSensor = 0L
     private val sign: Float by lazy { detectSign() }
-    private var ready = false
 
-    private val resting: Boolean get() = level <= 15 && !charging
-    private val happy: Boolean get() = charging && !hot
-    private val worried: Boolean get() = hot || resting
+    // geometry of the current frame
+    private var curHx = 0f
+    private var curCw = 0f
+    private var curCh = 0f
+
+    // timeline
+    private var lastFrame = 0L
+    private var danceUntil = 0L
+    private var act = -1
+    private var actStart = 0L
+    private var actDur = 0L
+    private var nextIdleAt = 0L
+    private var hourCached = 12
+    private var seasonCached = 0
+    private var clockAt = 0L
+
+    // wandering
+    private var walk = W_HOME
+    private var walkX = 0f
+    private var walkTarget = 0f
+    private var atStart = 0L
+    private var atUntil = 0L
+    private var holeVisit = false
+    private var nextWanderAt = 0L
+    private var cutoutX = -1f
+
+    // pocket pet
+    private var petPhase = 0
+    private var petT0 = 0L
+    private var nextPetAt = 0L
+    private var petX = 0f
+    private var petHop = 0f
+
+    // speech bubble
+    private var bubbleText: String? = null
+    private var bubbleUntil = 0L
+
+    // scripted scenes (the "Try her moods" buttons)
+    private var sceneState: BuddyState? = null
+    private var sceneUntil = 0L
+    private var sceneTod = -1
+    private var sceneSeason = -1
+    private var lastSceneId = 0L
+
+    private var loadedRev = -1L
+    private var ready = false
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> reload() }
 
     init {
-        look = Look.load(prefs)
-        applyLook()
+        reload()
+        art.setLook(look)
+        val now = SystemClock.uptimeMillis()
+        nextIdleAt = now + rnd(30_000L, 60_000L)
+        nextWanderAt = now + rnd(90_000L, 180_000L)
+        nextPetAt = now + rnd(15_000L, 30_000L)
         ready = true
     }
 
-    fun setBattery(level: Int, charging: Boolean, hot: Boolean) {
-        this.level = level
-        this.charging = charging
-        this.hot = hot
-        invalidate()
-    }
+    private fun rnd(lo: Long, hi: Long): Long = lo + (random.nextFloat() * (hi - lo)).toLong()
 
-    // ---------------- setup ----------------
-
-    private fun shade(c: Int, f: Float) = Color.rgb(
-        min(255, (Color.red(c) * f).toInt()),
-        min(255, (Color.green(c) * f).toInt()),
-        min(255, (Color.blue(c) * f).toInt())
-    )
-
-    private fun fill(color: Int, sh: Shader? = null) {
-        p.style = Paint.Style.FILL; p.color = color
-        p.shader = if (look.threeD) sh else null // gradients only in 3D mode
-    }
-
-    private fun stroke(color: Int, w: Float) {
-        p.shader = null
-        p.style = Paint.Style.STROKE; p.color = color; p.strokeWidth = w; p.strokeCap = Paint.Cap.ROUND
-    }
-
-    private fun applyLook() {
-        hairC = Look.HAIR_COLORS[look.hairColor]
-        skinC = Look.SKIN_COLORS[look.skin]
-        eyeC = Look.EYE_COLORS[look.eyes]
-        outC = Look.OUTFIT_COLORS[look.outfit]
-        faceSh = RadialGradient(
-            42f, 28f, 38f,
-            intArrayOf(shade(skinC, 1.08f), skinC, shade(skinC, 0.8f)), floatArrayOf(0f, 0.55f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        hairSh = LinearGradient(0f, 4f, 0f, 74f, shade(hairC, 1.3f), shade(hairC, 0.72f), Shader.TileMode.CLAMP)
-        bodySh = LinearGradient(26f, 54f, 74f, 90f, shade(outC, 1.25f), shade(outC, 0.72f), Shader.TileMode.CLAMP)
-        rebuild()
-        syncSensor()
-        invalidate()
-    }
-
-    private fun rebuild() {
-        val b = image
-        if (b == null) { shader = null; bodyColor = outC; return }
-        val k = max(2 * HEAD_R / b.width, 2 * HEAD_R / b.height)
-        shader = BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP).apply {
-            setLocalMatrix(Matrix().apply {
-                setScale(k, k)
-                postTranslate(HEAD_X - b.width * k / 2, HEAD_Y - HEAD_R) // centred, top-aligned (faces sit high)
-            })
+    private fun reload() {
+        look = Look.load(prefs)
+        behave = Behave.load(prefs)
+        fullBody = prefs.getBoolean("sprite", false)
+        val rev = prefs.getLong("rev", 0L)
+        if (rev != loadedRev) {
+            loadedRev = rev
+            image = Buddy.loadImage(context)
         }
-        val y = (b.height * 0.8f).toInt().coerceIn(0, b.height - 1)
-        val strip = Bitmap.createBitmap(b, 0, y, b.width, b.height - y)
-        val px = Bitmap.createScaledBitmap(strip, 1, 1, true).getPixel(0, 0)
-        bodyColor = if (Color.alpha(px) < 128) outC else px
+    }
+
+    // ---------------- public controls ----------------
+
+    fun say(text: String, ms: Long = 3500L) {
+        bubbleText = text
+        bubbleUntil = SystemClock.uptimeMillis() + ms
+        invalidate()
+    }
+
+    fun poke() {
+        startAction(A_POKE)
+        say("Look away for 20 s \uD83D\uDC40", 5000L)
+    }
+
+    fun setCutout(centerX: Float) {
+        cutoutX = centerX
+    }
+
+    fun startAction(a: Int) {
+        val now = SystemClock.uptimeMillis()
+        when (a) {
+            A_WALK -> beginWander(false)
+            A_HOLE -> beginWander(true)
+            A_PET -> { petPhase = 1; petT0 = now }
+            A_DANCE -> danceUntil = now + 7000L
+            else -> { act = a; actStart = now; actDur = DURATIONS[a] }
+        }
+        invalidate()
+    }
+
+    fun play(s: Scene) {
+        if (s.id == lastSceneId) return
+        lastSceneId = s.id
+        val now = SystemClock.uptimeMillis()
+        sceneUntil = now + 9000L
+        sceneState = s.state
+        sceneTod = s.tod
+        sceneSeason = s.season
+        val st = s.state
+        if (st != null && st.charging && st.level >= 100) danceUntil = now + 7000L
+        if (s.action >= 0) startAction(s.action)
+        s.bubble?.let { say(it, 5000L) }
+        invalidate()
+    }
+
+    private fun onState(old: BuddyState, new: BuddyState) {
+        if (new.charging && new.level >= 100 && !(old.charging && old.level >= 100)) {
+            danceUntil = SystemClock.uptimeMillis() + 6500L
+        }
     }
 
     // ---------------- lifecycle / sensors ----------------
@@ -146,7 +222,7 @@ class BuddyView(context: Context) : View(context), SensorEventListener {
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
-        look = Look.load(prefs)
+        reload()
         syncSensor()
     }
 
@@ -167,20 +243,20 @@ class BuddyView(context: Context) : View(context), SensorEventListener {
         sm.unregisterListener(this)
         if (look.threeD && look.tilt && isAttachedToWindow && isShown) {
             sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
-                sm.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+                sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
             }
         }
     }
 
     override fun onSensorChanged(e: SensorEvent) {
-        tiltY = (-e.values[0] / 9.81f).coerceIn(-1f, 1f)           // left/right roll
-        tiltX = (e.values[2] / 9.81f - 0.35f).coerceIn(-1f, 1f)    // forward/back pitch
+        tiltY = (-e.values[0] / 9.81f).coerceIn(-1f, 1f)
+        tiltX = (e.values[2] / 9.81f - 0.35f).coerceIn(-1f, 1f)
         lastSensor = SystemClock.uptimeMillis()
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    // ---------------- 3D helpers ----------------
+    // ---------------- 3D ----------------
 
     /** Which way does a positive rotateY move things? Measured once, so parallax always matches the camera. */
     private fun detectSign(): Float {
@@ -193,8 +269,8 @@ class BuddyView(context: Context) : View(context), SensorEventListener {
     }
 
     private fun updateRotation(t: Float) {
-        val tilting = look.tilt && SystemClock.uptimeMillis() - lastSensor < 1000
-        val targetY = if (tilting) tiltY * 40f else sin(t * 1.1f) * 28f   // follow the phone, or sway like a turntable
+        val tilting = look.tilt && SystemClock.uptimeMillis() - lastSensor < 1000L
+        val targetY = if (tilting) tiltY * 40f else sin(t * 1.1f) * 28f
         val targetX = if (tilting) tiltX * 25f else -6f
         ry += (targetY - ry) * 0.25f
         rx += (targetX - rx) * 0.25f
@@ -207,297 +283,377 @@ class BuddyView(context: Context) : View(context), SensorEventListener {
         return m3
     }
 
-    /** Draws one depth layer; in 3D, layers nearer the viewer (dz > 0) shift against the rotation = parallax. */
-    private inline fun layer(c: Canvas, dz: Float, dy: Float = 0f, block: () -> Unit) {
-        c.save()
-        c.translate(if (look.threeD) -sign * dz * sin(ry * DEG) else 0f, dy)
-        block()
-        c.restore()
+    // ---------------- clock ----------------
+
+    private fun updateClock(now: Long) {
+        if (clockAt != 0L && now - clockAt < 60_000L) return
+        clockAt = now
+        val cal = Calendar.getInstance()
+        hourCached = cal.get(Calendar.HOUR_OF_DAY)
+        seasonCached = DayClock.season(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH))
+    }
+
+    private fun effective(now: Long): BuddyState {
+        val s = sceneState
+        return if (now < sceneUntil && s != null) s else state
+    }
+
+    // ---------------- wandering and the pet ----------------
+
+    private fun beginWander(hole: Boolean) {
+        if (mode == MODE_SIMPLE) return
+        holeVisit = hole
+        val room = curHx + curCw / 2f // from her centre to the left screen edge
+        walkTarget = if (hole) {
+            when {
+                mode == MODE_STAGE -> -(width * 0.3f)
+                cutoutX > 0f -> cutoutX - (curHx + curCw / 2f)
+                else -> 0f
+            }
+        } else {
+            -min(max(0f, room - curCw), (60f + random.nextFloat() * 70f) * density)
+        }
+        if (holeVisit && walkTarget > -curCw * 1.2f) { // too close or no camera hole known: just stroll
+            holeVisit = false
+            walkTarget = -min(max(0f, room - curCw), 70f * density)
+        }
+        if (walkTarget > -curCw * 0.5f) {
+            nextWanderAt = SystemClock.uptimeMillis() + rnd(120_000L, 240_000L)
+            return
+        }
+        walk = W_OUT
+    }
+
+    private fun updateWander(now: Long, dt: Float, canRoam: Boolean) {
+        if (mode == MODE_SIMPLE) { walk = W_HOME; walkX = 0f; return }
+        val speed = 42f * density
+        when (walk) {
+            W_HOME -> if (canRoam && now >= nextWanderAt && act < 0) {
+                beginWander((cutoutX > 0f || mode == MODE_STAGE) && random.nextFloat() < 0.35f)
+            }
+            W_OUT -> if (!canRoam) {
+                walk = W_BACK
+            } else {
+                walkX -= speed * dt
+                if (walkX <= walkTarget) {
+                    walkX = walkTarget
+                    walk = W_AT
+                    atStart = now
+                    atUntil = now + if (holeVisit) 4200L else 2600L
+                }
+            }
+            W_AT -> if (now >= atUntil || !canRoam) walk = W_BACK
+            W_BACK -> {
+                walkX += speed * dt
+                if (walkX >= 0f) {
+                    walkX = 0f
+                    walk = W_HOME
+                    nextWanderAt = now + rnd(120_000L, 240_000L)
+                }
+            }
+        }
+    }
+
+    private fun updatePet(now: Long) {
+        if (mode == MODE_SIMPLE || !behave.pet) { petPhase = 0; petX = 0f; petHop = 0f; return }
+        val dist = 36f * density / (curCw / 100f).coerceAtLeast(0.01f)
+        when (petPhase) {
+            0 -> if (now >= nextPetAt) { petPhase = 1; petT0 = now }
+            1 -> {
+                val u = ((now - petT0) / 900f).coerceIn(0f, 1f)
+                petX = -dist * u
+                petHop = sin(u * PI.toFloat()) * 10f
+                if (u >= 1f) { petPhase = 2; petT0 = now; petHop = 0f }
+            }
+            2 -> if (now - petT0 > 4500L) { petPhase = 3; petT0 = now }
+            3 -> {
+                val u = ((now - petT0) / 900f).coerceIn(0f, 1f)
+                petX = -dist * (1f - u)
+                petHop = sin(u * PI.toFloat()) * 10f
+                if (u >= 1f) {
+                    petPhase = 0; petX = 0f; petHop = 0f
+                    nextPetAt = now + rnd(25_000L, 50_000L)
+                }
+            }
+        }
+    }
+
+    // ---------------- what is she doing? ----------------
+
+    private fun applyAction(now: Long, po: Pose) {
+        val e = now - actStart
+        if (e >= actDur) { act = -1; return }
+        val u = e / actDur.toFloat()
+        when (act) {
+            A_WAVE -> { po.armR = Pose.ARM_WAVE; po.eyes = Pose.EYES_HAPPY; po.mouth = Pose.MOUTH_OPEN }
+            A_STRETCH -> {
+                po.armL = Pose.ARM_UP; po.armR = Pose.ARM_UP; po.wave = 0f
+                po.eyes = Pose.EYES_CLOSED; po.mouth = Pose.MOUTH_YAWN
+            }
+            A_LOOK -> po.lookX = sin(u * 9.4248f)
+            A_BUBBLE -> { po.mouth = Pose.MOUTH_SMALL_O; po.bubble = if (u < 0.75f) u / 0.75f else 0f }
+            A_KICK -> {
+                po.swing = 3f; po.swingAmp = 26f; po.eyes = Pose.EYES_HAPPY; po.mouth = Pose.MOUTH_OPEN
+            }
+        }
+    }
+
+    private fun computePose(now: Long, st: BuddyState) {
+        val po = pose.reset()
+        val b = behave
+        updateClock(now)
+        val sceneOn = now < sceneUntil
+        val tod = if (sceneOn && sceneTod >= 0) sceneTod else DayClock.tod(hourCached)
+        val season = if (sceneOn && sceneSeason >= 0) sceneSeason else seasonCached
+        val t = now / 1000f
+        val blink = now % 4000L < 140L
+
+        val hot = st.hot
+        val dying = b.drama && !st.charging && st.level <= 5
+        val begging = b.drama && !st.charging && st.level in 6..10
+        val cold = b.cold && st.cold && !hot
+        val yawning = b.drama && !st.charging && st.level in 11..30
+        val dance = st.charging && st.level >= 100 && now < danceUntil
+        val zoom = b.fast && st.fast && !dance
+        val sleeping = b.sleep && st.charging && !st.fast && !dance
+        val music = b.music && st.music && !dying && !begging && !hot
+        val dnd = b.dnd && st.dnd
+        val calm = !(dying || begging || hot || cold)
+        var neutral = false
+
+        po.flush = hot
+        po.worried = hot
+
+        when {
+            dying -> {
+                po.eyes = Pose.EYES_X; po.mouth = Pose.MOUTH_FROWN
+                po.tilt = 12f; po.swing = 0f; po.swingAmp = 4f; po.bob = 0f; po.stars = true
+            }
+            begging -> {
+                po.eyes = Pose.EYES_BIG; po.mouth = Pose.MOUTH_SMALL_O
+                po.armL = Pose.ARM_BEG; po.armR = Pose.ARM_BEG
+                po.bob = 0.6f; po.swing = 0.3f; po.swingAmp = 8f
+            }
+            hot -> {
+                po.eyes = if (blink) Pose.EYES_BLINK else Pose.EYES_NORMAL
+                po.mouth = Pose.MOUTH_FROWN; po.swing = 0.7f; po.swingAmp = 8f
+            }
+            cold -> {
+                po.eyes = if (blink) Pose.EYES_BLINK else Pose.EYES_NORMAL
+                po.mouth = Pose.MOUTH_WAVY; po.scarf = true; po.shiver = 0.9f; po.swing = 0.4f; po.swingAmp = 6f
+            }
+            dance -> {
+                po.eyes = Pose.EYES_HAPPY; po.mouth = Pose.MOUTH_OPEN
+                po.armL = Pose.ARM_UP; po.armR = Pose.ARM_UP; po.wave = 1f
+                po.jump = abs(sin(t * 6f)) * 7f; po.swing = 2.8f; po.swingAmp = 26f
+                po.hearts = true; po.sparkles = true; po.wings = 1f
+            }
+            zoom -> {
+                po.eyes = Pose.EYES_HAPPY; po.mouth = Pose.MOUTH_OPEN
+                po.swing = 2.4f; po.swingAmp = 22f; po.bob = 2f
+                po.speed = true; po.hearts = true; po.wings = 1f
+            }
+            sleeping -> {
+                po.eyes = Pose.EYES_CLOSED; po.mouth = Pose.MOUTH_SMILE
+                po.zzz = true; po.bob = 0.5f; po.swing = 0.25f; po.swingAmp = 7f
+            }
+            yawning -> {
+                if ((now / 1000L) % 6L < 2L) {
+                    po.eyes = Pose.EYES_CLOSED; po.mouth = Pose.MOUTH_YAWN; po.armR = Pose.ARM_MOUTH
+                } else {
+                    po.eyes = Pose.EYES_HALF; po.mouth = Pose.MOUTH_FLAT; po.bob = 0.8f; po.swing = 0.5f
+                }
+            }
+            dnd -> {
+                po.eyes = Pose.EYES_HALF; po.mouth = Pose.MOUTH_FLAT; po.armR = Pose.ARM_MOUTH
+                po.moon = true; po.shh = true; po.bob = 0.5f; po.swing = 0.3f
+            }
+            else -> neutral = true
+        }
+
+        if (music) {
+            po.phones = true; po.notes = true
+            po.bob = max(po.bob, 2.4f); po.swing = max(po.swing, 1.4f)
+            if (po.eyes == Pose.EYES_CLOSED || po.eyes == Pose.EYES_HALF) po.eyes = Pose.EYES_HAPPY
+            if (po.mouth == Pose.MOUTH_YAWN || po.mouth == Pose.MOUTH_FLAT) po.mouth = Pose.MOUTH_OPEN
+            po.zzz = false; po.moon = false; po.shh = false
+            if (po.armR == Pose.ARM_MOUTH) po.armR = Pose.ARM_DOWN
+        }
+
+        if (neutral) {
+            po.eyes = if (blink) Pose.EYES_BLINK else Pose.EYES_NORMAL
+            if (!music) {
+                if (act < 0 && walk == W_HOME && b.idle && now >= nextIdleAt) {
+                    startAction(random.nextInt(5))
+                    nextIdleAt = now + rnd(45_000L, 90_000L)
+                }
+                if (act in 0..4) applyAction(now, po)
+            }
+            when (walk) {
+                W_OUT, W_BACK -> { po.swing = 3.2f; po.swingAmp = 24f; po.bob = 2.6f; po.mouth = Pose.MOUTH_OPEN }
+                W_AT -> if (holeVisit) {
+                    val e = now - atStart
+                    po.scale = when {
+                        e < 400L -> 1f - e / 400f
+                        e < 2600L -> 0f
+                        e < 3000L -> (e - 2600L) / 400f
+                        else -> 1f
+                    }
+                    if (e >= 3000L) { po.armR = Pose.ARM_WAVE; po.eyes = Pose.EYES_HAPPY; po.mouth = Pose.MOUTH_OPEN }
+                } else {
+                    po.armR = Pose.ARM_WAVE; po.eyes = Pose.EYES_HAPPY; po.mouth = Pose.MOUTH_OPEN
+                }
+            }
+        }
+
+        if (act == A_POKE) {
+            if (calm && now - actStart < actDur) {
+                po.armR = Pose.ARM_POKE
+                if (po.eyes == Pose.EYES_CLOSED || po.eyes == Pose.EYES_HALF) po.eyes = Pose.EYES_NORMAL
+                po.mouth = Pose.MOUTH_OPEN; po.zzz = false
+            } else {
+                act = -1
+            }
+        }
+
+        if (calm) {
+            if (b.tod) {
+                when (tod) {
+                    DayClock.NIGHT -> po.nightcap = true
+                    DayClock.NOON -> if (po.eyes != Pose.EYES_CLOSED) po.shades = true
+                    DayClock.MORNING -> if (neutral && act < 0 && !music && walk == W_HOME) {
+                        po.mug = true; po.armR = Pose.ARM_MUG
+                    }
+                }
+            }
+            if (b.season) {
+                when (season) {
+                    DayClock.S_HALLOWEEN -> po.hat = Pose.HAT_PUMPKIN
+                    DayClock.S_XMAS -> po.hat = Pose.HAT_SANTA
+                    DayClock.S_NEWYEAR -> { po.hat = Pose.HAT_PARTY; po.sparkles = true }
+                    DayClock.S_VALENTINE -> po.hearts = true
+                    DayClock.S_INDIA -> po.hat = Pose.HAT_TRICOLOR
+                    DayClock.S_DIWALI -> { po.festival = Pose.FESTIVAL_DIYA; po.sparkles = true }
+                    DayClock.S_SAKURA -> { po.hat = Pose.HAT_FLOWER; po.festival = Pose.FESTIVAL_PETALS }
+                }
+            }
+            if (po.hat != Pose.HAT_NONE) po.nightcap = false
+            if (b.mood && neutral) {
+                if (st.hearts >= 4) po.sparkles = true else if (st.hearts <= 1) po.cloud = true
+            }
+        }
+        if (walk != W_HOME) po.wings = 1f
     }
 
     // ---------------- drawing ----------------
 
+    private fun box(c: Canvas, x: Float) {
+        c.translate(x, 0f)
+        c.scale(curCw / 100f, curCh / 125f)
+        c.scale(0.92f, 0.92f, 50f, 125f) // headroom for tall ears, hats and spikes
+    }
+
     override fun onDraw(c: Canvas) {
-        c.scale(width / 100f, height / 125f)
-        c.scale(0.92f, 0.92f, 50f, 125f) // headroom for tall ears and spikes
-        // rest mode: frozen pose, redrawn once a second -> almost no power use
-        val t = if (resting) 0f else SystemClock.uptimeMillis() / 1000f * look.speed
-        if (look.threeD) {
-            updateRotation(t)
-            c.concat(cameraMatrix())
+        val now = SystemClock.uptimeMillis()
+        val dt = if (lastFrame == 0L) 0f else ((now - lastFrame) / 1000f).coerceIn(0f, 0.25f)
+        lastFrame = now
+        val st = effective(now)
+
+        when (mode) {
+            MODE_OVERLAY -> { curCw = charW; curCh = charW * 1.25f; curHx = width - rightMargin - curCw }
+            MODE_STAGE -> { curCh = height.toFloat(); curCw = curCh * 0.8f; curHx = (width - curCw) / 2f }
+            else -> { curCw = width.toFloat(); curCh = height.toFloat(); curHx = 0f }
         }
-        val bmp = image
-        when {
-            bmp != null && sprite -> layer(c, 0f) { drawSprite(c, bmp, t) }
-            bmp != null -> drawPortrait(c, t)
-            else -> drawCharacter(c, t)
-        }
-        postInvalidateDelayed(if (resting) 1000L else if (look.threeD) 50L else 80L) // stops by itself when hidden
-    }
+        if (curCw <= 0f || curCh <= 0f) return
 
-    private fun drawSprite(c: Canvas, bmp: Bitmap, t: Float) {
-        val s = min(100f / bmp.width, 100f / bmp.height)
-        val w = bmp.width * s
-        val h = bmp.height * s
-        c.rotate(sin(t * 2.5f) * 3f, 50f, 100f)
-        c.drawBitmap(bmp, null, RectF(50f - w / 2, 100f - h, 50f + w / 2, 100f), null)
-    }
+        val frozen = !st.charging && st.level <= 5
+        val t = if (frozen) 0f else now / 1000f * look.speed
+        val canRoam = mode != MODE_SIMPLE && behave.wander && !st.saver && !st.charging && !st.hot &&
+            !st.cold && st.level > 30 && !st.dnd && !(behave.music && st.music)
+        updateWander(now, dt, canRoam)
+        updatePet(now)
+        computePose(now, st)
+        if (look.threeD) updateRotation(t)
 
-    private fun drawPortrait(c: Canvas, t: Float) {
-        val sh = shader ?: return
-        val bob = sin(t * 3f) * 1.2f
-        layer(c, -2f) { drawLegs(c, t, shade(bodyColor, 0.6f), 0xFF222222.toInt()) }
-        layer(c, 0f, bob) { drawBody(c, bodyColor, null) }
-        layer(c, 6f, bob) {
-            fill(Color.WHITE); p.shader = sh
-            c.drawCircle(HEAD_X, HEAD_Y, HEAD_R, p)
-            p.shader = null
-            stroke(if (hot) RED else Color.WHITE, 2.5f)
-            c.drawCircle(HEAD_X, HEAD_Y, HEAD_R, p)
-            drawMood(c, t)
-        }
-    }
-
-    private fun drawCharacter(c: Canvas, t: Float) {
-        val bob = sin(t * 3f) * 1.2f
-        val blink = SystemClock.uptimeMillis() % 4000 < 140
-        layer(c, -10f) { drawTail(c) }
-        layer(c, -6f, bob) { drawHairBack(c) }
-        layer(c, -2f) { drawLegs(c, t, skinC, shade(outC, 0.7f)) }
-        layer(c, 0f, bob) { drawBody(c, outC, bodySh) }
-        layer(c, 6f, bob) { drawHead(c, blink); drawMood(c, t) }
-    }
-
-    private fun tri(c: Canvas, x1: Float, y1: Float, x2: Float, y2: Float, x3: Float, y3: Float) {
-        path.reset(); path.moveTo(x1, y1); path.lineTo(x2, y2); path.lineTo(x3, y3); path.close()
-        c.drawPath(path, p)
-    }
-
-    private fun drawTail(c: Canvas) {
-        when (look.ears) {
-            1 -> { // cat tail
-                stroke(hairC, 5f)
-                path.reset(); path.moveTo(68f, 82f); path.cubicTo(92f, 86f, 98f, 62f, 88f, 48f)
-                c.drawPath(path, p)
-            }
-            2 -> { // bunny pom
-                fill(Color.WHITE); c.drawCircle(77f, 84f, 6.5f, p)
-            }
-            3 -> { // fluffy fox tail with a white tip
-                c.save(); c.rotate(35f, 74f, 84f)
-                fill(hairC, hairSh); c.drawOval(RectF(68f, 58f, 92f, 98f), p)
-                fill(Color.WHITE); c.drawOval(RectF(70f, 58f, 90f, 72f), p)
-                c.restore()
-            }
-        }
-    }
-
-    private fun drawHairBack(c: Canvas) {
-        fill(hairC, hairSh)
-        when (look.hair) {
-            0 -> { // twin tails
-                c.drawOval(RectF(9f, 34f, 31f, 78f), p)
-                c.drawOval(RectF(69f, 34f, 91f, 78f), p)
-            }
-            3 -> c.drawRoundRect(RectF(19f, 18f, 81f, 94f), 26f, 26f, p) // long hair behind the shoulders
-        }
-    }
-
-    private fun drawLegs(c: Canvas, t: Float, leg: Int, shoe: Int) {
-        val swing = sin(t * 3f) * 14f
-        for (side in intArrayOf(-1, 1)) {
-            val hx = 50f + side * 12f
-            c.save()
-            c.rotate(swing * side, hx, 80f)
-            fill(leg); c.drawRoundRect(hx - 5f, 78f, hx + 5f, 108f, 5f, 5f, p)
-            fill(shoe); c.drawRoundRect(hx - 7f, 103f, hx + 7f, 114f, 5f, 5f, p)
+        if (mode != MODE_SIMPLE && behave.pet) {
+            c.save(); box(c, curHx)
+            art.drawPet(c, petX, petHop, t)
             c.restore()
         }
-    }
-
-    private fun drawBody(c: Canvas, color: Int, sh: Shader?) {
-        fill(color, sh)
-        c.drawRoundRect(RectF(28f, 54f, 72f, 88f), 12f, 12f, p)
-        c.drawRoundRect(RectF(20f, 58f, 31f, 80f), 5f, 5f, p)
-        c.drawRoundRect(RectF(69f, 58f, 80f, 80f), 5f, 5f, p)
-        fill(skinC)
-        c.drawCircle(25.5f, 82f, 5f, p)
-        c.drawCircle(74.5f, 82f, 5f, p)
-    }
-
-    private fun drawEars(c: Canvas) {
-        if (look.ears == 0) return
-        for (m in 0..1) {
-            c.save()
-            if (m == 1) c.scale(-1f, 1f, 50f, 0f)
-            when (look.ears) {
-                1 -> {
-                    fill(hairC, hairSh); tri(c, 22f, 26f, 24f, 2f, 44f, 14f)
-                    fill(PINK); tri(c, 27f, 22f, 28f, 9f, 38f, 15f)
-                }
-                2 -> {
-                    c.rotate(-8f, 36f, 24f)
-                    fill(hairC, hairSh); c.drawOval(RectF(30f, -9f, 43f, 24f), p)
-                    fill(PINK_LIGHT); c.drawOval(RectF(33f, -4f, 40f, 19f), p)
-                }
-                3 -> {
-                    fill(hairC, hairSh); tri(c, 21f, 32f, 19f, -3f, 47f, 16f)
-                    fill(shade(hairC, 0.45f)); tri(c, 25f, 26f, 24f, 6f, 38f, 16f)
-                }
-            }
+        if (pose.scale > 0.02f) {
+            c.save(); box(c, curHx + walkX)
+            if (look.threeD) c.concat(cameraMatrix())
+            art.ry = ry; art.sign = sign
+            art.draw(c, pose, t, fullBody)
             c.restore()
         }
+        if (mode == MODE_STAGE && holeVisit && walk != W_HOME) drawFakeHole(c)
+        drawBubble(c, now)
+        postInvalidateDelayed(frameDelay(st))
     }
 
-    private fun drawHead(c: Canvas, blink: Boolean) {
-        // hair behind the face
-        fill(hairC, hairSh)
-        when (look.hair) {
-            1 -> c.drawRoundRect(RectF(20f, 12f, 80f, 66f), 26f, 26f, p)
-            2 -> c.drawCircle(50f, 38f, 27f, p)
-            else -> c.drawCircle(50f, 38f, 29f, p)
-        }
-        if (look.hair == 2) { // spiky crown
-            for (s in listOf(
-                floatArrayOf(28f, 18f, 34f, -4f, 46f, 12f),
-                floatArrayOf(40f, 12f, 52f, -9f, 62f, 12f),
-                floatArrayOf(56f, 12f, 68f, -4f, 74f, 18f)
-            )) tri(c, s[0], s[1], s[2], s[3], s[4], s[5])
-        }
-        drawEars(c)
+    private fun drawFakeHole(c: Canvas) {
+        bp.style = Paint.Style.FILL; bp.color = 0xFF111111.toInt()
+        c.drawCircle(curHx + curCw / 2f + walkTarget, 8f * density, 5f * density, bp)
+    }
 
-        // face, red flush when overheating, blush
-        fill(skinC, faceSh); c.drawOval(RectF(26f, 16f, 74f, 60f), p)
-        if (hot) { fill(0x55FF3B30); c.drawOval(RectF(26f, 16f, 74f, 60f), p) }
-        fill(0x66FF6F91)
-        c.drawOval(RectF(27f, 47f, 37f, 53f), p)
-        c.drawOval(RectF(63f, 47f, 73f, 53f), p)
+    private fun drawBubble(c: Canvas, now: Long) {
+        val text = bubbleText ?: return
+        if (now > bubbleUntil) { bubbleText = null; return }
+        if (mode == MODE_SIMPLE) return
+        val size = (curCh * 0.26f).coerceIn(9f * density, 14f * density)
+        tp.textSize = size; tp.color = 0xFF3B2A4D.toInt()
+        val w = tp.measureText(text) + size * 1.2f
+        val h = size * 1.7f
+        val right = curHx + walkX + curCw * 0.1f
+        val top = curCh * 0.1f
+        bp.style = Paint.Style.FILL; bp.color = 0xF5FFFFFF.toInt()
+        rect.set(right - w, top, right, top + h)
+        c.drawRoundRect(rect, h / 2f, h / 2f, bp)
+        tail.reset()
+        tail.moveTo(right - h * 0.5f, top + h * 0.5f)
+        tail.lineTo(right + h * 0.35f, top + h * 0.75f)
+        tail.lineTo(right - h * 0.2f, top + h * 0.85f)
+        tail.close()
+        c.drawPath(tail, bp)
+        c.drawText(text, right - w / 2f, top + h / 2f + size * 0.36f, tp)
+    }
 
-        // eyes
-        for (ex in floatArrayOf(38f, 62f)) {
-            if (happy) {
-                stroke(DARK, 2.6f)
-                path.reset(); path.moveTo(ex - 5f, 45f); path.quadTo(ex, 37f, ex + 5f, 45f)
-                c.drawPath(path, p)
-            } else if (blink) {
-                stroke(DARK, 2.4f); c.drawLine(ex - 5f, 44f, ex + 5f, 44f, p)
-            } else {
-                fill(eyeC); c.drawOval(RectF(ex - 5f, 36f, ex + 5f, 51f), p)
-                fill(shade(eyeC, 0.4f)); c.drawOval(RectF(ex - 3f, 39f, ex + 3f, 50f), p)
-                fill(Color.WHITE)
-                c.drawCircle(ex + 1.5f, 40f, 2.3f, p)
-                c.drawCircle(ex - 1.5f, 47f, 1.1f, p)
-            }
-        }
-
-        // mouth
-        path.reset()
-        when {
-            happy -> {
-                fill(0xFFD6336C.toInt())
-                path.moveTo(45f, 53f); path.quadTo(50f, 61f, 55f, 53f); path.close()
-                c.drawPath(path, p)
-            }
-            worried -> {
-                stroke(DARK, 2f)
-                path.moveTo(45f, 56f); path.quadTo(50f, 51f, 55f, 56f)
-                c.drawPath(path, p)
-            }
-            else -> {
-                stroke(DARK, 2f)
-                path.moveTo(45f, 53f); path.quadTo(50f, 57f, 55f, 53f)
-                c.drawPath(path, p)
-            }
-        }
-
-        // fringe
-        fill(hairC, hairSh); path.reset()
-        when (look.hair) {
-            1 -> { // short bob: straight fringe + side locks
-                path.moveTo(24f, 40f); path.cubicTo(24f, 8f, 76f, 8f, 76f, 40f)
-                path.lineTo(76f, 32f); path.quadTo(50f, 42f, 24f, 32f); path.close()
-                c.drawPath(path, p)
-                c.drawRoundRect(RectF(22f, 28f, 31f, 58f), 4f, 4f, p)
-                c.drawRoundRect(RectF(69f, 28f, 78f, 58f), 4f, 4f, p)
-            }
-            2 -> { // spiky fringe
-                path.moveTo(24f, 40f); path.cubicTo(24f, 10f, 76f, 10f, 76f, 40f)
-                path.lineTo(70f, 24f); path.lineTo(64f, 38f); path.lineTo(56f, 20f); path.lineTo(50f, 36f)
-                path.lineTo(44f, 20f); path.lineTo(36f, 38f); path.lineTo(30f, 24f); path.close()
-                c.drawPath(path, p)
-            }
-            3 -> { // long hair, centre parting
-                path.moveTo(25f, 42f); path.cubicTo(25f, 8f, 75f, 8f, 75f, 42f)
-                path.quadTo(62f, 34f, 50f, 20f); path.quadTo(38f, 34f, 25f, 42f); path.close()
-                c.drawPath(path, p)
-            }
-            else -> { // zigzag bangs
-                path.moveTo(25f, 40f); path.cubicTo(25f, 8f, 75f, 8f, 75f, 40f)
-                path.lineTo(68f, 26f); path.lineTo(61f, 35f); path.lineTo(50f, 24f)
-                path.lineTo(39f, 35f); path.lineTo(32f, 26f); path.close()
-                c.drawPath(path, p)
-            }
-        }
-        if (look.threeD) { // hair shine
-            stroke(0x66FFFFFF, 3f)
-            path.reset(); path.moveTo(32f, 24f); path.quadTo(50f, 12f, 68f, 24f)
-            c.drawPath(path, p)
-        }
-
-        // accessory
-        when (look.acc) {
-            1 -> { // bow
-                fill(RED); path.reset()
-                path.moveTo(50f, 63f); path.lineTo(41f, 58f); path.lineTo(41f, 68f); path.close()
-                path.moveTo(50f, 63f); path.lineTo(59f, 58f); path.lineTo(59f, 68f); path.close()
-                c.drawPath(path, p)
-                c.drawCircle(50f, 63f, 2.6f, p)
-            }
-            2 -> { // glasses
-                stroke(DARK, 1.8f)
-                c.drawCircle(38f, 43f, 8.5f, p)
-                c.drawCircle(62f, 43f, 8.5f, p)
-                c.drawLine(46.5f, 43f, 53.5f, 43f, p)
-            }
-            3 -> { // headphones
-                stroke(0xFF30343F.toInt(), 4f)
-                path.reset(); path.moveTo(23f, 44f); path.cubicTo(20f, -2f, 80f, -2f, 77f, 44f)
-                c.drawPath(path, p)
-                fill(outC)
-                c.drawOval(RectF(14f, 36f, 27f, 56f), p)
-                c.drawOval(RectF(73f, 36f, 86f, 56f), p)
-            }
+    /** Slower when nothing much is happening: this is what keeps her cheap on the battery. */
+    private fun frameDelay(st: BuddyState): Long {
+        val active = walk != W_HOME || act >= 0 || petPhase != 0 || pose.jump > 0f || pose.speed || pose.notes
+        return when {
+            st.saver -> 250L
+            !st.charging && st.level <= 5 -> 600L
+            !st.charging && st.level <= 15 -> 200L
+            active -> 55L
+            pose.zzz -> 120L
+            look.threeD -> 66L
+            else -> 80L
         }
     }
 
-    private fun drawMood(c: Canvas, t: Float) {
-        if (happy) {
-            c.save()
-            c.translate(88f, 14f + sin(t * 4f) * 2f); c.scale(1.3f, 1.3f)
-            fill(PINK); path.reset()
-            path.moveTo(0f, 2.5f); path.cubicTo(-7f, -2f, -3.5f, -8f, 0f, -4f)
-            path.cubicTo(3.5f, -8f, 7f, -2f, 0f, 2.5f)
-            c.drawPath(path, p)
-            c.restore()
-        } else if (worried) {
-            c.save()
-            c.translate(87f, 22f)
-            fill(0xFF74C0FC.toInt()); path.reset()
-            path.moveTo(0f, 0f); path.cubicTo(-6f, 8f, -5f, 14f, 0f, 14f)
-            path.cubicTo(5f, 14f, 6f, 8f, 0f, 0f)
-            c.drawPath(path, p)
-            c.restore()
-        }
-    }
+    companion object {
+        const val MODE_SIMPLE = 0
+        const val MODE_OVERLAY = 1
+        const val MODE_STAGE = 2
 
-    private companion object {
-        const val HEAD_X = 50f
-        const val HEAD_Y = 36f
-        const val HEAD_R = 27f
-        const val DEG = 0.0174533f
-        val DARK = 0xFF2B2D42.toInt()
-        val PINK = 0xFFFF6F91.toInt()
-        val PINK_LIGHT = 0xFFFFB3C7.toInt()
-        val RED = 0xFFE63946.toInt()
+        const val A_WAVE = 0
+        const val A_STRETCH = 1
+        const val A_LOOK = 2
+        const val A_BUBBLE = 3
+        const val A_KICK = 4
+        const val A_POKE = 5
+        const val A_DANCE = 6
+        const val A_WALK = 7
+        const val A_HOLE = 8
+        const val A_PET = 9
+
+        private const val W_HOME = 0
+        private const val W_OUT = 1
+        private const val W_AT = 2
+        private const val W_BACK = 3
+
+        private val DURATIONS = longArrayOf(2600L, 2600L, 3000L, 2600L, 2200L, 4000L)
     }
 }

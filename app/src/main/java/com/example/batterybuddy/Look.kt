@@ -35,7 +35,10 @@ data class Look(
             0xFF2B2D42.toInt(), 0xFFF1F3F5.toInt(), 0xFFFFD166.toInt(), 0xFF9D4EDD.toInt()
         )
         val EAR_NAMES = listOf("None", "Cat", "Bunny", "Fox")
-        val ACC_NAMES = listOf("None", "Bow", "Glasses", "Headphones")
+        val ACC_NAMES = listOf("None", "Bow", "Glasses", "Headphones", "Halo", "Crown", "Wings", "Star shades")
+
+        /** Buddy level needed for each accessory (see Stats.level). */
+        val ACC_UNLOCK = intArrayOf(1, 1, 1, 1, 3, 5, 8, 12)
         val STYLE_NAMES = listOf("2D (flat)", "3D (figurine)")
 
         /** pref keys, in the same order as the preset arrays below */
