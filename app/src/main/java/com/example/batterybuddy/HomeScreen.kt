@@ -9,6 +9,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -19,24 +24,30 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.delay
 
-/** The real BuddyView, embedded. It follows every setting live. */
+/** Lets the Life tab's buttons send a scripted scene to the stage preview. */
+object PreviewBus {
+    var scene by mutableStateOf<Scene?>(null)
+}
+
+/** The real BuddyView, embedded. It follows every setting live, and the phone's real state every few seconds. */
 @Composable
-fun BuddyPreview(modifier: Modifier = Modifier) {
+fun BuddyPreview(modifier: Modifier = Modifier, mode: Int = BuddyView.MODE_SIMPLE, scenes: Boolean = false) {
     val ctx = LocalContext.current
-    val (rev, _) = rememberPref("rev", 0L)
-    val (sprite, _) = rememberPref("sprite", false)
+    val holder = remember { arrayOfNulls<BuddyView>(1) }
+    val scene = if (scenes) PreviewBus.scene else null
     AndroidView(
         modifier = modifier,
-        factory = { BuddyView(it) },
-        update = { v ->
-            if (v.tag != rev) {
-                v.tag = rev
-                v.image = Buddy.loadImage(ctx)
-            }
-            v.sprite = sprite
-        }
+        factory = { c -> BuddyView(c).also { it.mode = mode; holder[0] = it } },
+        update = { v -> if (scene != null) v.play(scene) }
     )
+    LaunchedEffect(Unit) {
+        while (true) {
+            holder[0]?.state = BuddyState.snapshot(ctx)
+            delay(5000)
+        }
+    }
 }
 
 @Composable
@@ -81,6 +92,15 @@ fun HomeScreen() {
                 )
             }
         }
+        item {
+            SectionCard("Home-screen widget", "🏠") {
+                Text(
+                    "Long-press an empty spot on your home screen, tap Widgets, and add Battery Buddy. She shows your battery and her mood right there.",
+                    color = PlumSoft,
+                    fontSize = 14.sp
+                )
+            }
+        }
     }
 }
 
@@ -97,7 +117,7 @@ private fun Hero(who: String, is3d: Boolean) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Battery Buddy ✨", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = Plum)
             Text("a tiny friend for your battery icon", color = PlumSoft, fontSize = 14.sp)
-            BuddyPreview(Modifier.size(160.dp, 200.dp))
+            BuddyPreview(Modifier.fillMaxWidth().height(190.dp), BuddyView.MODE_STAGE)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Pill(who)
                 Pill(if (is3d) "3D figurine" else "2D flat")

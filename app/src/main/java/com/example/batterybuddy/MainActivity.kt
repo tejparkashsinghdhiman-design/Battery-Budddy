@@ -42,7 +42,7 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(clear, clear)
         )
 
-        // needed on Android 13+ for the charge-limit and overheat alerts
+        // needed on Android 13+ for the alerts and the weekly report
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
         }
@@ -53,9 +53,11 @@ class MainActivity : ComponentActivity() {
 
 private val TABS = listOf(
     "🏠" to "Home",
-    "🌸" to "Characters",
+    "🌸" to "Pick",
     "🎨" to "Create",
-    "🛡️" to "Safety"
+    "💖" to "Life",
+    "💬" to "Chat",
+    "🛡️" to "Care"
 )
 
 @Composable
@@ -76,9 +78,9 @@ fun BuddyApp() {
                         NavigationBarItem(
                             selected = tab == i,
                             onClick = { tab = i },
-                            icon = { Text(emoji, fontSize = 22.sp) },
+                            icon = { Text(emoji, fontSize = 20.sp) },
                             label = {
-                                Text(label, fontSize = 11.sp, fontWeight = if (tab == i) FontWeight.Bold else FontWeight.Normal)
+                                Text(label, fontSize = 10.sp, fontWeight = if (tab == i) FontWeight.Bold else FontWeight.Normal)
                             },
                             colors = NavigationBarItemDefaults.colors(
                                 indicatorColor = SakuraSoft,
@@ -96,6 +98,8 @@ fun BuddyApp() {
                         0 -> HomeScreen()
                         1 -> CharactersScreen(top, search, snackbar)
                         2 -> CreateScreen()
+                        3 -> LifeScreen()
+                        4 -> ChatScreen()
                         else -> SafetyScreen()
                     }
                 }

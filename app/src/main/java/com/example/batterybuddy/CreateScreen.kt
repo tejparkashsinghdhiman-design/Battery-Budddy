@@ -30,6 +30,8 @@ fun CreateScreen() {
     val (speed, setSpeed) = rememberPref("speed", 100)
     val (sprite, setSprite) = rememberPref("sprite", false)
     val (custom, _) = rememberPref("custom", false)
+    val (xp, _) = rememberPref("xp", 0)
+    val level = Stats.level(xp)
     val current = intArrayOf(hair, hairColor, skin, eyes, outfit, ears, acc)
 
     LazyColumn(
@@ -87,7 +89,12 @@ fun CreateScreen() {
                 Swatches("Eyes", Look.EYE_COLORS, eyes, setEyes)
                 Swatches("Outfit", Look.OUTFIT_COLORS, outfit, setOutfit)
                 ChipChoice("Ears and tail", Look.EAR_NAMES, ears, setEars)
-                ChipChoice("Accessory", Look.ACC_NAMES, acc, setAcc)
+                AccessoryChips(acc, level, setAcc)
+                Text(
+                    "Halo, crown, wings and star shades unlock as your buddy levels up. Check the Life tab.",
+                    color = PlumSoft,
+                    fontSize = 13.sp
+                )
             }
         }
 
@@ -102,11 +109,32 @@ fun CreateScreen() {
         item {
             SectionCard("Your own picture", "📷") {
                 Text(
-                    "Pick a picture on the Characters tab. A normal picture becomes her head. A full-body PNG with a transparent background looks best drawn as-is.",
+                    "Pick a picture on the Pick tab. A normal picture becomes her head. A full-body PNG with a transparent background looks best drawn as-is.",
                     color = PlumSoft,
                     fontSize = 14.sp
                 )
                 SwitchRow("Draw it as a full-body sprite", "Turn on for transparent full-body PNGs", sprite, setSprite)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AccessoryChips(selected: Int, level: Int, onSelect: (Int) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Accessory", fontWeight = FontWeight.SemiBold, color = Plum)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Look.ACC_NAMES.forEachIndexed { i, name ->
+                val locked = level < Look.ACC_UNLOCK[i]
+                FilterChip(
+                    selected = i == selected,
+                    onClick = { if (!locked) onSelect(i) },
+                    enabled = !locked,
+                    label = { Text(if (locked) "🔒 $name · Lv ${Look.ACC_UNLOCK[i]}" else name) },
+                    shape = RoundedCornerShape(50),
+                    colors = chipColors()
+                )
             }
         }
     }
